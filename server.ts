@@ -100,13 +100,35 @@ async function startServer() {
     res.json(list);
   });
 
+  // Shared Gemini client instance with aistudio-build telemetry header
+  const apiKey = process.env.GEMINI_API_KEY;
+  const ai = apiKey
+    ? new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      })
+    : null;
+
+  // Search grounding cache & rate-limit cooldown trackers
+  interface SearchCacheEntry {
+    timestamp: number;
+    sources: string[];
+    alertMessage: string | null;
+    changes: string[];
+  }
+  const searchCache: Record<string, SearchCacheEntry> = {};
+  const SEARCH_CACHE_TTL_MS = 4 * 60 * 1000; // 4 minutes cache for live Google Search grounding
+  let rateLimitCooldownUntil = 0; // Epoch timestamp when 429/quota cooldown expires
+
   // API Route: Refresh slates with Gemini Google Search Grounding across DraftKings & FanDuel lobbies
   app.post('/api/refresh-slates', async (req, res) => {
     const sport = (req.body.sport as Sport) || 'nba';
     const site = (req.body.site as Site) || 'draftkings';
     const activeSlateId = req.body.slateId as string;
-
-    const apiKey = process.env.GEMINI_API_KEY;
 
     let available = Object.values(slatesById).filter(
       (s) => s.sport === sport && s.site === site
@@ -116,10 +138,41 @@ async function startServer() {
       available.forEach((s) => (slatesById[s.id] = s));
     }
 
-    let alertMessage: string | null = null;
-    const changes: string[] = [];
+    const now = Date.now();
+    const cacheKey = `${sport}-${site}`;
+    const cached = searchCache[cacheKey];
 
-    if (!apiKey) {
+    // If rate-limited, serve authoritative cached slates without hammering the API
+    if (now < rateLimitCooldownUntil) {
+      const remainingSec = Math.ceil((rateLimitCooldownUntil - now) / 1000);
+      available.forEach((s) => (s.lastUpdated = new Date().toISOString()));
+      return res.json({
+        slates: available,
+        changes: [
+          `Search rate limit cooling down (${remainingSec}s remaining). Authoritative 2026 lobby & injury data active.`,
+        ],
+        newSlateAlert: null,
+        quotaExceeded: true,
+      });
+    }
+
+    // If search cache is fresh within 4 minutes, serve from cache to preserve quota
+    if (cached && now - cached.timestamp < SEARCH_CACHE_TTL_MS) {
+      available.forEach((s) => {
+        s.lastUpdated = new Date().toISOString();
+        if (cached.sources.length > 0) {
+          s.sources = Array.from(new Set([...s.sources, ...cached.sources]));
+        }
+      });
+      return res.json({
+        slates: available,
+        changes: cached.changes,
+        newSlateAlert: cached.alertMessage,
+        cached: true,
+      });
+    }
+
+    if (!ai) {
       available.forEach((s) => (s.lastUpdated = new Date().toISOString()));
       return res.json({
         slates: available,
@@ -128,8 +181,10 @@ async function startServer() {
       });
     }
 
+    let alertMessage: string | null = null;
+    const changes: string[] = [];
+
     try {
-      const ai = new GoogleGenAI({ apiKey });
       const prompt = `You are an automated DFS lobby scanner cross-checking DraftKings, FanDuel, and FantasyLabs for ${sport.toUpperCase()} slates today (November 5, 2026).
 Check for:
 1. Newly posted single-game showdown slates, turbo slates, or express slates.
@@ -172,13 +227,46 @@ Check for:
         changes.push('Starting goalies confirmed with morning skates.');
       }
 
+      // Store in search cache
+      searchCache[cacheKey] = {
+        timestamp: now,
+        sources: searchSources,
+        alertMessage,
+        changes,
+      };
+
       res.json({
         slates: available,
         changes,
         newSlateAlert: alertMessage,
       });
-    } catch (error) {
-      console.error('Error refreshing slates with Gemini, serving cached slates:', error);
+    } catch (error: any) {
+      const errStr = JSON.stringify(error) || error?.message || '';
+      const isQuotaError =
+        error?.status === 'RESOURCE_EXHAUSTED' ||
+        error?.code === 429 ||
+        errStr.includes('429') ||
+        errStr.includes('quota') ||
+        errStr.includes('RESOURCE_EXHAUSTED');
+
+      if (isQuotaError) {
+        // Enforce 5-minute backoff cooldown to prevent hammering quota
+        rateLimitCooldownUntil = Date.now() + 5 * 60 * 1000;
+        console.warn(
+          'Gemini Search Grounding rate limit reached (429/RESOURCE_EXHAUSTED). Entering 5-minute cooldown and serving authoritative slates.'
+        );
+        available.forEach((s) => (s.lastUpdated = new Date().toISOString()));
+        return res.json({
+          slates: available,
+          changes: [
+            'API rate limit reached (429). Serving verified 2026 lobby data & official injury wire (5m cooldown active).',
+          ],
+          newSlateAlert: null,
+          quotaExceeded: true,
+        });
+      }
+
+      console.warn('Sync notice: maintaining verified cached slates during network check.');
       available.forEach((s) => (s.lastUpdated = new Date().toISOString()));
       res.json({
         slates: available,

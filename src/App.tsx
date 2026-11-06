@@ -179,7 +179,10 @@ export default function App() {
         }
 
         const active = (data.slates || slates).find((s: SportSlate) => s.id === slateId);
-        if (active) {
+        if (data.quotaExceeded) {
+          // Rate-limit backoff: delay auto-refresh for 5 minutes (300s)
+          setSecondsUntilNextRefresh(300);
+        } else if (active) {
           const isPrimetime = active.gameCount === 1 || active.isCaptainMode;
           const schedule = calculateRefreshSchedule(
             active.firstGameTime,
