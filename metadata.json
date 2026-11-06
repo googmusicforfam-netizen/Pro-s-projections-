@@ -1,0 +1,6 @@
+{
+  "name": "Pros Projections",
+  "description": "Daily tournament DFS projections for DraftKings & FanDuel across NBA, NFL, NHL, MLB & NASCAR with live grounding, ownership, stacks, and lineup optimizer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
