@@ -49,13 +49,20 @@ export interface RefreshIntervalInfo {
 
 /**
  * Calculates dynamic refresh interval according to tournament rules:
- * - > 3 hours before first event: every 15 mins (900s)
- * - 3 hours to 1 hour out: every 5 mins (300s)
- * - Within 1 hour: every 2 mins (120s)
- * - Within 30 minutes: every 60s (critical scratch/lineup window)
+ * - For primetime and single game slates: run availability check every 60s starting 3 hours before kickoff
+ *   and right after official inactives are posted (90 mins before kickoff).
+ * - For standard slates:
+ *   - > 3 hours before first event: every 15 mins (900s)
+ *   - 3 hours to 1 hour out: every 5 mins (300s)
+ *   - Within 1 hour: every 2 mins (120s)
+ *   - Within 30 minutes: every 60s (critical scratch/lineup window)
  * - Once all events have started/concluded: stop until tomorrow
  */
-export function calculateRefreshSchedule(firstGameIso: string, lastGameIso: string): RefreshIntervalInfo {
+export function calculateRefreshSchedule(
+  firstGameIso: string,
+  lastGameIso: string,
+  isSingleGameOrPrimetime = false
+): RefreshIntervalInfo {
   const now = new Date().getTime();
   const firstGame = new Date(firstGameIso).getTime();
   const lastGame = new Date(lastGameIso).getTime();
@@ -86,6 +93,22 @@ export function calculateRefreshSchedule(firstGameIso: string, lastGameIso: stri
   }
 
   const hoursToStart = msToFirstGame / (3600 * 1000);
+
+  // Primetime / Single Game Rule:
+  // "For primetime and single game slates, run the availability check every 60 seconds
+  // starting three hours before kickoff and again right after official inactives are posted, about 90 minutes before kickoff"
+  if (isSingleGameOrPrimetime && hoursToStart <= 3) {
+    const is90MinWindow = minutesToStart <= 95 && minutesToStart >= 85;
+    return {
+      seconds: 60,
+      label: is90MinWindow
+        ? '60s Inactives Window (Official 90m Inactives)'
+        : '60s Primetime Crunch (<3h to kickoff)',
+      isLockedSlate: false,
+      isPastAllGames: false,
+      minutesToStart,
+    };
+  }
 
   if (hoursToStart > 3) {
     return {

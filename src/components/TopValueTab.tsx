@@ -1,6 +1,7 @@
 import React from 'react';
 import { PlayerProjection, Sport, Site } from '../types';
-import { Flame, Snowflake, Lock, Ban, Sparkles, TrendingUp, CheckCircle } from 'lucide-react';
+import { formatVerifiedTime } from '../utils/availabilityEngine';
+import { Flame, Snowflake, Lock, Ban, TrendingUp, AlertTriangle, ShieldCheck } from 'lucide-react';
 
 interface TopValueTabProps {
   players: PlayerProjection[];
@@ -22,27 +23,55 @@ export const TopValueTab: React.FC<TopValueTabProps> = ({
   onToggleExclude,
 }) => {
   // CRITICAL REQUIREMENT:
-  // "Exclude anyone ruled out or already started."
+  // "Any player who is on injured reserve, ruled out, inactive, suspended, on the injured list,
+  // or a confirmed scratch must be removed from the top 20 value list."
   // Top 20 Value plays sorted by value score (pts per $1k) descending
   const top20ValuePlays = React.useMemo(() => {
     return players
-      .filter((p) => p.status !== 'OUT' && !p.isStarted && p.projectedPoints > 0)
+      .filter((p) => {
+        if (p.isStarted) return false;
+        if (p.projectedPoints <= 0) return false;
+        if (
+          p.status === 'OUT' ||
+          p.status === 'IR' ||
+          p.status === 'INACTIVE' ||
+          p.status === 'SCRATCH' ||
+          p.status === 'SUSPENDED'
+        ) {
+          return false;
+        }
+        return true;
+      })
       .sort((a, b) => b.valueScore - a.valueScore)
       .slice(0, 20);
   }, [players]);
 
-  const getStatusBadge = (status: string) => {
-    switch (status) {
+  const getStatusBadge = (player: PlayerProjection) => {
+    if (player.verification.hasConflict) {
+      return (
+        <span
+          className="text-[10px] font-black px-2 py-0.5 rounded bg-rose-600 text-white uppercase flex items-center gap-1 shadow-sm"
+          title={player.verification.conflictNote}
+        >
+          <AlertTriangle className="w-3 h-3 text-white" />
+          Conflict
+        </span>
+      );
+    }
+
+    switch (player.status) {
       case 'CONFIRMED':
-        return <span className="text-xs font-semibold text-emerald-400">Confirmed</span>;
+        return <span className="text-xs font-bold text-emerald-400">Confirmed</span>;
       case 'PROBABLE':
-        return <span className="text-xs font-semibold text-teal-400">Probable</span>;
+        return <span className="text-xs font-bold text-teal-400">Probable</span>;
       case 'QUESTIONABLE':
-        return <span className="text-xs font-semibold text-amber-400">Questionable</span>;
-      case 'GTD':
-        return <span className="text-xs font-semibold text-orange-400">GTD</span>;
+        return (
+          <span className="text-[10px] font-black px-2 py-0.5 rounded bg-amber-400 text-slate-950 uppercase shadow-sm">
+            Questionable
+          </span>
+        );
       default:
-        return <span className="text-xs font-semibold text-slate-400">Active</span>;
+        return <span className="text-xs font-bold text-slate-400">Active</span>;
     }
   };
 
@@ -83,12 +112,13 @@ export const TopValueTab: React.FC<TopValueTabProps> = ({
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Ranked by points per $1,000 salary (value score). Inactive & started players automatically excluded.
+            Ranked by points per $1,000 salary. Purged of all IR, OUT, and inactive players through 3-source verification.
           </p>
         </div>
 
-        <div className="text-xs text-slate-300 bg-slate-950/80 px-3.5 py-2 rounded-xl border border-slate-800 font-mono shrink-0">
-          Target Value Threshold: <span className="text-emerald-400 font-bold">5.0x+</span>
+        <div className="flex items-center gap-2 text-xs text-slate-300 bg-slate-950/80 px-3.5 py-2 rounded-xl border border-slate-800 font-mono shrink-0">
+          <ShieldCheck className="w-4 h-4 text-emerald-400" />
+          <span>Multi-Source Verified</span>
         </div>
       </div>
 
@@ -103,8 +133,8 @@ export const TopValueTab: React.FC<TopValueTabProps> = ({
             <div
               key={player.id}
               className={`bg-slate-900/90 border border-slate-800/80 hover:border-slate-700/80 rounded-2xl p-4 sm:p-4.5 transition-all shadow-md ${
-                isLocked ? 'border-emerald-500/80 bg-emerald-950/20 ring-1 ring-emerald-500/40' : ''
-              } ${isExcluded ? 'opacity-40' : ''}`}
+                player.verification.hasConflict ? 'border-rose-500/50 bg-rose-950/15' : ''
+              } ${isLocked ? 'border-emerald-500/80 bg-emerald-950/20 ring-1 ring-emerald-500/40' : ''}`}
             >
               <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
                 {/* Left Area: Rank, Player Name, Position, Team, Status */}
@@ -134,13 +164,29 @@ export const TopValueTab: React.FC<TopValueTabProps> = ({
                       <span className="text-slate-300 font-semibold text-xs sm:text-sm">
                         {player.team} {player.isHome ? 'vs' : '@'} {player.opponent}
                       </span>
+                      {player.isPromotedBackup && (
+                        <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                          PROMOTED STARTER
+                        </span>
+                      )}
                     </div>
 
-                    <div className="flex items-center gap-2 mt-1 text-xs text-slate-400">
-                      {getStatusBadge(player.status)}
+                    <div className="flex items-center gap-2 mt-1 text-xs text-slate-400 flex-wrap">
+                      {getStatusBadge(player)}
+                      <span>·</span>
+                      <span className="font-mono text-[10px] text-slate-400">
+                        {formatVerifiedTime(player.verification.lastVerifiedTime)}
+                      </span>
                       <span>·</span>
                       <span className="text-slate-300">{player.whyNote}</span>
                     </div>
+
+                    {/* Injury Boost Note */}
+                    {player.injuryBoostNote && (
+                      <div className="text-xs text-emerald-300 font-semibold bg-emerald-950/70 border border-emerald-500/40 px-2 py-0.5 rounded mt-1.5 inline-block">
+                        {player.injuryBoostNote}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -198,7 +244,7 @@ export const TopValueTab: React.FC<TopValueTabProps> = ({
                     </div>
                   </div>
 
-                  {/* Lock / Add Action Button (44px min hit box) */}
+                  {/* Lock / Add Action Button */}
                   <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       onClick={() => onToggleLock(player.id)}

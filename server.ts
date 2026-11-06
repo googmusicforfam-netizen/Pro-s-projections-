@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { getAllSlates, getUpcoming7DaySlates } from './src/data/slatesRepository2026.ts';
-import { Sport, Site, SportSlate } from './src/types.ts';
+import type { Sport, Site, SportSlate } from './src/types.ts';
 
 dotenv.config();
 
