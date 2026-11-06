@@ -39,15 +39,14 @@ async function startServer() {
     const sport = (req.query.sport as Sport) || 'nba';
     const site = (req.query.site as Site) || 'draftkings';
 
-    // Retrieve slates from cache or repository
-    let slates = Object.values(slatesById).filter(
-      (s) => s.sport === sport && s.site === site
-    );
-
-    if (slates.length === 0) {
-      slates = getAllSlates(sport, site);
-      slates.forEach((s) => (slatesById[s.id] = s));
-    }
+    // Retrieve all available draft groups / fixture lists for this sport & site
+    let slates = getAllSlates(sport, site);
+    slates.forEach((s) => {
+      if (slatesById[s.id]?.sources) {
+        s.sources = Array.from(new Set([...s.sources, ...slatesById[s.id].sources]));
+      }
+      slatesById[s.id] = s;
+    });
 
     // Check lock status based on start time
     const now = Date.now();
@@ -130,13 +129,13 @@ async function startServer() {
     const site = (req.body.site as Site) || 'draftkings';
     const activeSlateId = req.body.slateId as string;
 
-    let available = Object.values(slatesById).filter(
-      (s) => s.sport === sport && s.site === site
-    );
-    if (available.length === 0) {
-      available = getAllSlates(sport, site);
-      available.forEach((s) => (slatesById[s.id] = s));
-    }
+    let available = getAllSlates(sport, site);
+    available.forEach((s) => {
+      if (slatesById[s.id]?.sources) {
+        s.sources = Array.from(new Set([...s.sources, ...slatesById[s.id].sources]));
+      }
+      slatesById[s.id] = s;
+    });
 
     const now = Date.now();
     const cacheKey = `${sport}-${site}`;

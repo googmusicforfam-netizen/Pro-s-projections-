@@ -142,9 +142,9 @@ export const Header: React.FC<HeaderProps> = ({
           })}
         </div>
 
-        {/* Dynamic Countdown & Timing status */}
-        <div className="hidden lg:flex items-center gap-3 text-[11px] text-slate-400 shrink-0">
-          <div className="flex items-center gap-1.5">
+        {/* Dynamic Countdown, Sources summary & Timing status */}
+        <div className="flex items-center gap-3 text-[11px] text-slate-400 shrink-0">
+          <div className="hidden sm:flex items-center gap-1.5">
             <span className="inline-block w-2 h-2 rounded-full bg-emerald-400" />
             <span>
               {refreshInfo.isLockedSlate
@@ -155,9 +155,15 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="text-slate-400">{refreshInfo.label}</span>
           </div>
           {slate && (
-            <span className="text-slate-400">
-              Updated: <span className="text-slate-300 font-mono">{formatLastUpdated(slate.lastUpdated)}</span>
-            </span>
+            <button
+              onClick={() => setShowSourcesModal(true)}
+              className="flex items-center gap-1.5 text-slate-400 hover:text-slate-200 bg-slate-900/60 hover:bg-slate-800/80 px-2 py-0.5 rounded border border-slate-800 transition-colors"
+              title="Click to view all grounded sources and verification status"
+            >
+              <span className="text-emerald-400 font-semibold">{slate.sources.length} Sources</span>
+              <span className="text-slate-600">·</span>
+              <span>Updated: <span className="text-slate-200 font-mono font-medium">{formatLastUpdated(slate.lastUpdated)}</span></span>
+            </button>
           )}
         </div>
       </div>
