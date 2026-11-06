@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Sport, Site, TabType, SportSlate } from './types';
+import { Sport, Site, TabType, SportSlate, SlateMeta } from './types';
 import { Header } from './components/Header';
+import { SlateSelector } from './components/SlateSelector';
+import { UpcomingSlatesModal } from './components/UpcomingSlatesModal';
 import { ProjectionsTab } from './components/ProjectionsTab';
 import { TopValueTab } from './components/TopValueTab';
 import { OwnershipLeverageTab } from './components/OwnershipLeverageTab';
@@ -8,7 +10,7 @@ import { StacksTab } from './components/StacksTab';
 import { NewsAlertsTab } from './components/NewsAlertsTab';
 import { LineupBuilderTab } from './components/LineupBuilderTab';
 import { calculateRefreshSchedule, RefreshIntervalInfo } from './utils/timeFormat';
-import { getSlateForSportAndSite } from './data/defaultSlates2026';
+import { getAllSlates, getUpcoming7DaySlates } from './data/slatesRepository2026';
 import {
   Table2,
   TrendingUp,
@@ -20,6 +22,7 @@ import {
   Ban,
   Clock,
   Sparkles,
+  CalendarDays,
 } from 'lucide-react';
 
 export default function App() {
@@ -27,9 +30,15 @@ export default function App() {
   const [currentSite, setCurrentSite] = useState<Site>('draftkings');
   const [activeTab, setActiveTab] = useState<TabType>('projections');
 
-  const [slate, setSlate] = useState<SportSlate | null>(null);
+  // Slates state for the active sport and site
+  const [slates, setSlates] = useState<SportSlate[]>([]);
+  const [selectedSlateId, setSelectedSlateId] = useState<string>('');
+  const [upcoming7DaysList, setUpcoming7DaysList] = useState<SlateMeta[]>([]);
+  const [isUpcomingModalOpen, setIsUpcomingModalOpen] = useState<boolean>(false);
+
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [recentChanges, setRecentChanges] = useState<string[]>([]);
+  const [newSlateAlert, setNewSlateAlert] = useState<string | null>(null);
 
   // Locks and Excludes shared state across all tabs
   const [lockedPlayerIds, setLockedPlayerIds] = useState<string[]>([]);
@@ -45,32 +54,50 @@ export default function App() {
     minutesToStart: 120,
   });
 
-  // Load initial slate
-  const loadSlate = useCallback(
-    async (sport: Sport, site: Site, isManualRefresh = false) => {
+  // Load all slates for current sport and site
+  const loadSlatesForSportAndSite = useCallback(
+    async (sport: Sport, site: Site, preferredSlateId?: string) => {
       setIsRefreshing(true);
       try {
-        const res = await fetch(`/api/slate?sport=${sport}&site=${site}`);
-        if (!res.ok) throw new Error('Failed to fetch from server');
-        const data: SportSlate = await res.json();
-        setSlate(data);
+        const res = await fetch(`/api/slates?sport=${sport}&site=${site}`);
+        if (!res.ok) throw new Error('Failed to fetch slates');
+        const data: SportSlate[] = await res.json();
+        setSlates(data);
 
-        // Update schedule
-        if (data.firstGameTime && data.lastGameTime) {
-          const schedule = calculateRefreshSchedule(data.firstGameTime, data.lastGameTime);
+        // Pick active slate:
+        // If preferredSlateId is in data, pick it.
+        // Otherwise, pick first non-locked slate. If all locked, pick first.
+        const nonLocked = data.filter((s) => s.status !== 'Locked');
+        const defaultSlate =
+          data.find((s) => s.id === preferredSlateId) ||
+          nonLocked[0] ||
+          data[0];
+
+        if (defaultSlate) {
+          setSelectedSlateId(defaultSlate.id);
+          const schedule = calculateRefreshSchedule(defaultSlate.firstGameTime, defaultSlate.lastGameTime);
           setRefreshInfo(schedule);
           if (schedule.seconds > 0) {
             setSecondsUntilNextRefresh(schedule.seconds);
           }
         }
       } catch (err) {
-        console.warn('Backend fetch failed, using resilient local 2026 cache:', err);
-        const fallback = getSlateForSportAndSite(sport, site);
-        setSlate(fallback);
-        const schedule = calculateRefreshSchedule(fallback.firstGameTime, fallback.lastGameTime);
-        setRefreshInfo(schedule);
-        if (schedule.seconds > 0) {
-          setSecondsUntilNextRefresh(schedule.seconds);
+        console.warn('Backend fetch failed, using local 2026 slates repo:', err);
+        const fallback = getAllSlates(sport, site);
+        setSlates(fallback);
+        const nonLocked = fallback.filter((s) => s.status !== 'Locked');
+        const defaultSlate =
+          fallback.find((s) => s.id === preferredSlateId) ||
+          nonLocked[0] ||
+          fallback[0];
+
+        if (defaultSlate) {
+          setSelectedSlateId(defaultSlate.id);
+          const schedule = calculateRefreshSchedule(defaultSlate.firstGameTime, defaultSlate.lastGameTime);
+          setRefreshInfo(schedule);
+          if (schedule.seconds > 0) {
+            setSecondsUntilNextRefresh(schedule.seconds);
+          }
         }
       } finally {
         setIsRefreshing(false);
@@ -79,55 +106,108 @@ export default function App() {
     []
   );
 
-  // Manual or Auto Trigger with Live Search Grounding
+  // Fetch 7-day upcoming slates index
+  const loadUpcoming7Days = useCallback(async () => {
+    try {
+      const res = await fetch('/api/upcoming-7days');
+      if (res.ok) {
+        const list = await res.json();
+        setUpcoming7DaysList(list);
+      } else {
+        setUpcoming7DaysList(getUpcoming7DaySlates());
+      }
+    } catch {
+      setUpcoming7DaysList(getUpcoming7DaySlates());
+    }
+  }, []);
+
+  // Trigger live search sync across DraftKings & FanDuel lobbies
   const triggerFreshSync = useCallback(
-    async (sport: Sport, site: Site) => {
+    async (sport: Sport, site: Site, slateId: string) => {
       setIsRefreshing(true);
       try {
-        const res = await fetch('/api/refresh', {
+        const res = await fetch('/api/refresh-slates', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sport, site }),
+          body: JSON.stringify({ sport, site, slateId }),
         });
 
         if (!res.ok) throw new Error('Refresh request failed');
         const data = await res.json();
-        if (data.slate) {
-          setSlate(data.slate);
+        if (data.slates && data.slates.length > 0) {
+          setSlates(data.slates);
         }
         if (data.changes && data.changes.length > 0) {
           setRecentChanges(data.changes);
         }
+        if (data.newSlateAlert) {
+          setNewSlateAlert(data.newSlateAlert);
+          setTimeout(() => setNewSlateAlert(null), 8000);
+        }
 
-        // Reset countdown
-        if (slate) {
-          const schedule = calculateRefreshSchedule(slate.firstGameTime, slate.lastGameTime);
+        // Reset countdown for active slate
+        const active = (data.slates || slates).find((s: SportSlate) => s.id === slateId);
+        if (active) {
+          const schedule = calculateRefreshSchedule(active.firstGameTime, active.lastGameTime);
           setRefreshInfo(schedule);
           if (schedule.seconds > 0) {
             setSecondsUntilNextRefresh(schedule.seconds);
           }
         }
       } catch (err) {
-        console.warn('Live refresh error, preserving last good data:', err);
+        console.warn('Live refresh error, preserving cached slates:', err);
       } finally {
         setIsRefreshing(false);
       }
     },
-    [slate]
+    [slates]
   );
 
-  // Initial load & sport/site change
+  // Initial load
   useEffect(() => {
-    loadSlate(currentSport, currentSite);
-  }, [currentSport, currentSite, loadSlate]);
+    loadSlatesForSportAndSite(currentSport, currentSite);
+    loadUpcoming7Days();
+  }, [currentSport, currentSite, loadSlatesForSportAndSite, loadUpcoming7Days]);
 
-  // Dynamic tournament auto-refresh timer loop
+  // Active Slate object derived from selectedSlateId
+  const currentSlate = useMemo(() => {
+    return slates.find((s) => s.id === selectedSlateId) || slates[0] || null;
+  }, [slates, selectedSlateId]);
+
+  // When active slate changes, reset countdown based on that slate's game times
+  useEffect(() => {
+    if (currentSlate) {
+      const schedule = calculateRefreshSchedule(currentSlate.firstGameTime, currentSlate.lastGameTime);
+      setRefreshInfo(schedule);
+      if (schedule.seconds > 0) {
+        setSecondsUntilNextRefresh(schedule.seconds);
+      }
+    }
+  }, [currentSlate]);
+
+  // Check if active slate just locked, and if so, auto-default to next available upcoming slate
+  useEffect(() => {
+    if (!currentSlate) return;
+    const now = Date.now();
+    const startMs = new Date(currentSlate.firstGameTime).getTime();
+
+    if (now >= startMs && currentSlate.status !== 'Locked') {
+      // Find next upcoming non-locked slate
+      const nextAvailable = slates.find(
+        (s) => s.id !== currentSlate.id && new Date(s.firstGameTime).getTime() > now
+      );
+      if (nextAvailable) {
+        setSelectedSlateId(nextAvailable.id);
+      }
+    }
+  }, [currentSlate, slates]);
+
+  // Auto-refresh countdown loop
   useEffect(() => {
     const timer = setInterval(() => {
       setSecondsUntilNextRefresh((prev) => {
         if (prev <= 1) {
-          // Trigger refresh!
-          triggerFreshSync(currentSport, currentSite);
+          triggerFreshSync(currentSport, currentSite, selectedSlateId);
           return refreshInfo.seconds || 300;
         }
         return prev - 1;
@@ -135,7 +215,7 @@ export default function App() {
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [currentSport, currentSite, refreshInfo.seconds, triggerFreshSync]);
+  }, [currentSport, currentSite, selectedSlateId, refreshInfo.seconds, triggerFreshSync]);
 
   // Lock & Exclude handlers
   const handleToggleLock = (id: string) => {
@@ -143,7 +223,6 @@ export default function App() {
       if (prev.includes(id)) {
         return prev.filter((pId) => pId !== id);
       } else {
-        // If locking, remove from excluded
         setExcludedPlayerIds((ex) => ex.filter((pId) => pId !== id));
         return [...prev, id];
       }
@@ -155,7 +234,6 @@ export default function App() {
       if (prev.includes(id)) {
         return prev.filter((pId) => pId !== id);
       } else {
-        // If excluding, remove from locked
         setLockedPlayerIds((lk) => lk.filter((pId) => pId !== id));
         return [...prev, id];
       }
@@ -163,20 +241,26 @@ export default function App() {
   };
 
   const handleLockMultiplePlayers = (playerNames: string[]) => {
-    if (!slate) return;
-    const matchingIds = slate.players
+    if (!currentSlate) return;
+    const matchingIds = currentSlate.players
       .filter((p) => playerNames.some((name) => p.name.includes(name) || name.includes(p.name)))
       .map((p) => p.id);
 
     setLockedPlayerIds((prev) => Array.from(new Set([...prev, ...matchingIds])));
     setExcludedPlayerIds((ex) => ex.filter((id) => !matchingIds.includes(id)));
-    // Switch to lineup builder to preview stack
     setActiveTab('builder');
   };
 
   const handleClearLocksAndExcludes = () => {
     setLockedPlayerIds([]);
     setExcludedPlayerIds([]);
+  };
+
+  // Jump from 7-day upcoming calendar directly into a slate
+  const handleJumpToUpcomingSlate = (slateId: string, sport: Sport, site: Site) => {
+    setCurrentSport(sport);
+    setCurrentSite(site);
+    loadSlatesForSportAndSite(sport, site, slateId);
   };
 
   const tabs: { id: TabType; label: string; icon: React.FC<{ className?: string }> }[] = [
@@ -193,19 +277,69 @@ export default function App() {
       {/* Top Bar with Sport Selector & DK/FD Toggle */}
       <Header
         currentSport={currentSport}
-        onSelectSport={(sport) => setCurrentSport(sport)}
+        onSelectSport={(sport) => {
+          setCurrentSport(sport);
+          setLockedPlayerIds([]);
+          setExcludedPlayerIds([]);
+        }}
         currentSite={currentSite}
-        onToggleSite={(site) => setCurrentSite(site)}
-        slate={slate}
+        onToggleSite={(site) => {
+          setCurrentSite(site);
+          setLockedPlayerIds([]);
+          setExcludedPlayerIds([]);
+        }}
+        slate={currentSlate}
         refreshInfo={refreshInfo}
         secondsUntilNextRefresh={secondsUntilNextRefresh}
         isRefreshing={isRefreshing}
-        onRefreshNow={() => triggerFreshSync(currentSport, currentSite)}
+        onRefreshNow={() => triggerFreshSync(currentSport, currentSite, selectedSlateId)}
         recentChanges={recentChanges}
+      />
+
+      {/* Granular Slate Selector Bar (Under sport selector & site toggle) */}
+      <SlateSelector
+        slates={slates}
+        selectedSlateId={selectedSlateId}
+        onSelectSlate={(id) => {
+          setSelectedSlateId(id);
+          setLockedPlayerIds([]);
+          setExcludedPlayerIds([]);
+        }}
+        onOpenUpcomingModal={() => setIsUpcomingModalOpen(true)}
+        currentSport={currentSport}
+        currentSite={currentSite}
+        newSlateAlert={newSlateAlert}
       />
 
       {/* Main App Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-4 lg:px-6 py-4 pb-20 space-y-4">
+        {/* Active Slate Banner Strip */}
+        {currentSlate && (
+          <div className="bg-slate-900/60 border border-slate-800/80 px-4 py-2.5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-bold text-white font-display text-sm">
+                Active Slate:
+              </span>
+              <span className="text-emerald-400 font-bold">
+                {currentSlate.slateName}
+              </span>
+              <span className="text-slate-500">·</span>
+              <span className="text-slate-300 font-mono">
+                {currentSlate.players.length} Players Available
+              </span>
+              {currentSlate.isCaptainMode && (
+                <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/30">
+                  {currentSite === 'draftkings' ? 'DraftKings Showdown (CPT 1.5x $ & Pts)' : 'FanDuel Single Game (MVP 1.5x Pts)'}
+                </span>
+              )}
+            </div>
+
+            <div className="text-slate-400 font-mono text-[11px] shrink-0">
+              Salary Cap: <strong className="text-white">${currentSlate.salaryCap.toLocaleString()}</strong> · Roster: <strong className="text-slate-200">{currentSlate.rosterSlots.join(', ')}</strong>
+            </div>
+          </div>
+        )}
+
         {/* Navigation Tabs Bar */}
         <div className="bg-slate-900/90 border border-slate-800/90 p-1.5 rounded-2xl flex items-center gap-1 overflow-x-auto no-scrollbar shadow-lg sticky top-[92px] sm:top-[96px] z-20 backdrop-blur-md">
           {tabs.map((tab) => {
@@ -228,7 +362,7 @@ export default function App() {
                     {lockedPlayerIds.length}L / {excludedPlayerIds.length}E
                   </span>
                 )}
-                {tab.id === 'news' && slate?.highPriorityAlert && (
+                {tab.id === 'news' && currentSlate?.highPriorityAlert && (
                   <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
                 )}
               </button>
@@ -236,12 +370,12 @@ export default function App() {
           })}
         </div>
 
-        {/* Tab Content Display */}
-        {slate ? (
+        {/* Tab Content Display - Strictly For Selected Slate */}
+        {currentSlate ? (
           <div>
             {activeTab === 'projections' && (
               <ProjectionsTab
-                players={slate.players}
+                players={currentSlate.players}
                 sport={currentSport}
                 site={currentSite}
                 lockedPlayerIds={lockedPlayerIds}
@@ -253,7 +387,7 @@ export default function App() {
 
             {activeTab === 'top_value' && (
               <TopValueTab
-                players={slate.players}
+                players={currentSlate.players}
                 sport={currentSport}
                 site={currentSite}
                 lockedPlayerIds={lockedPlayerIds}
@@ -265,7 +399,7 @@ export default function App() {
 
             {activeTab === 'leverage' && (
               <OwnershipLeverageTab
-                players={slate.players}
+                players={currentSlate.players}
                 sport={currentSport}
                 site={currentSite}
                 lockedPlayerIds={lockedPlayerIds}
@@ -277,7 +411,7 @@ export default function App() {
 
             {activeTab === 'stacks' && (
               <StacksTab
-                stacks={slate.stacks}
+                stacks={currentSlate.stacks}
                 sport={currentSport}
                 site={currentSite}
                 lockedPlayerIds={lockedPlayerIds}
@@ -287,19 +421,19 @@ export default function App() {
 
             {activeTab === 'news' && (
               <NewsAlertsTab
-                news={slate.news}
-                highPriorityAlert={slate.highPriorityAlert}
+                news={currentSlate.news}
+                highPriorityAlert={currentSlate.highPriorityAlert}
                 sport={currentSport}
               />
             )}
 
             {activeTab === 'builder' && (
               <LineupBuilderTab
-                players={slate.players}
+                players={currentSlate.players}
                 sport={currentSport}
                 site={currentSite}
-                salaryCap={slate.salaryCap}
-                rosterSlots={slate.rosterSlots}
+                salaryCap={currentSlate.salaryCap}
+                rosterSlots={currentSlate.rosterSlots}
                 lockedPlayerIds={lockedPlayerIds}
                 excludedPlayerIds={excludedPlayerIds}
                 onToggleLock={handleToggleLock}
@@ -311,10 +445,18 @@ export default function App() {
         ) : (
           <div className="py-20 text-center space-y-3">
             <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto" />
-            <p className="text-xs text-slate-400">Loading live 2026 DFS slate...</p>
+            <p className="text-xs text-slate-400">Loading slate data from official lobby...</p>
           </div>
         )}
       </main>
+
+      {/* 7-Day Multi-Sport Upcoming Slates Modal */}
+      <UpcomingSlatesModal
+        isOpen={isUpcomingModalOpen}
+        onClose={() => setIsUpcomingModalOpen(false)}
+        upcomingSlates={upcoming7DaysList}
+        onSelectSlate={handleJumpToUpcomingSlate}
+      />
 
       {/* Footer Strip with Sources & Grounding Notice */}
       <footer className="border-t border-slate-800/80 bg-slate-950/90 py-4 px-4 text-xs text-slate-500 mt-auto">
@@ -322,11 +464,11 @@ export default function App() {
           <div className="flex items-center gap-2">
             <span className="font-bold text-slate-400 font-display">Pros Projections</span>
             <span>·</span>
-            <span>Strictly 2026 Current Season DFS Analytics</span>
+            <span>DraftKings & FanDuel Lobbies Grounding</span>
           </div>
 
           <div className="text-[11px] text-slate-500">
-            Primary Projections: Fantasy Fuel DFS · Verified with Official Lineups & Injury Reports
+            Current 2026 Season Slate Rules · Cross-Checked with FantasyLabs & Official Inactives
           </div>
         </div>
       </footer>

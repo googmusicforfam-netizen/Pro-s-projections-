@@ -1438,6 +1438,23 @@ export function getSlateForSportAndSite(sport: Sport, site: Site): SportSlate {
       : undefined;
 
   return {
+    id: `${site}-${sport}-default`,
+    dayLabel: 'Tonight (Thu, Nov 5)',
+    slateName:
+      sport === 'nfl'
+        ? 'Jacksonville at Baltimore (1 game, 8:15 PM)'
+        : sport === 'nba'
+        ? 'Main Slate (5 games, 7:00 PM)'
+        : sport === 'nhl'
+        ? 'Main Slate (4 games, 7:00 PM)'
+        : 'Championship Race (1 race, 3:00 PM)',
+    shortLabel: 'Main Slate',
+    format: sport === 'nfl' ? (isFD ? 'single_game_mvp' : 'showdown_captain') : 'classic',
+    gameCount: sport === 'nfl' ? 1 : sport === 'nba' ? 5 : sport === 'nhl' ? 4 : 1,
+    teams: ['BOS', 'PHI', 'MIL', 'NYK', 'PHX', 'MIN', 'DAL', 'GSW', 'DEN', 'LAL'],
+    gameSummary: sport === 'nfl' ? 'JAX @ BAL' : '5 Games on Slate',
+    status: 'Upcoming',
+    isCaptainMode: sport === 'nfl',
     sport,
     sportLabel: sport.toUpperCase(),
     hasGamesToday,

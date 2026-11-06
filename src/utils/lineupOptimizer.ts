@@ -1,21 +1,33 @@
-import { PlayerProjection, GeneratedLineup, Site, Sport } from '../types';
+import { PlayerProjection, GeneratedLineup, Site, Sport, SlateFormat } from '../types';
 
 export interface OptimizerOptions {
   lockedPlayerIds: string[];
   excludedPlayerIds: string[];
   lineupCount: number; // 1 to 20
   maxExposure: number; // e.g. 0.60 = 60%
-  stackPreference?: 'correlated' | 'balanced' | 'contrarian';
+  isCaptainMode?: boolean;
+  format?: SlateFormat;
 }
 
-/**
- * Checks if a player can fill a given roster slot based on sport and site
- */
-export function canFillSlot(player: PlayerProjection, slotName: string, sport: Sport): boolean {
+export function canFillSlot(
+  player: PlayerProjection,
+  slotName: string,
+  sport: Sport,
+  isCaptainMode: boolean
+): boolean {
   if (player.status === 'OUT') return false;
 
-  const pos = player.position.toUpperCase();
   const slot = slotName.toUpperCase();
+  const pos = player.position.toUpperCase();
+
+  // Showdown / Single Game slots
+  if (isCaptainMode || slot.startsWith('CPT') || slot.startsWith('MVP') || slot.startsWith('STAR') || slot.startsWith('PRO')) {
+    return true; // Any player in showdown can be CPT, MVP, or FLEX
+  }
+  if (slot === 'FLEX' || slot === 'UTIL') {
+    if (sport === 'nfl') return pos === 'RB' || pos === 'WR' || pos === 'TE' || pos === 'QB' || pos === 'K' || pos === 'DST';
+    return true;
+  }
 
   if (sport === 'nba') {
     if (slot === pos) return true;
@@ -30,8 +42,8 @@ export function canFillSlot(player: PlayerProjection, slotName: string, sport: S
     if (slot === pos) return true;
     if (player.eligiblePositions && player.eligiblePositions.includes(slot)) return true;
     if (slot === 'FLEX' && (pos === 'RB' || pos === 'WR' || pos === 'TE')) return true;
-    if (slot === 'DEF' && pos === 'DST') return true;
-    if (slot === 'DST' && pos === 'DEF') return true;
+    if (slot === 'DEF' && (pos === 'DST' || pos === 'DEF')) return true;
+    if (slot === 'DST' && (pos === 'DEF' || pos === 'DST')) return true;
     return false;
   }
 
@@ -43,15 +55,12 @@ export function canFillSlot(player: PlayerProjection, slotName: string, sport: S
   }
 
   if (sport === 'nascar') {
-    return true; // All are drivers
+    return true; // All drivers
   }
 
   return slot === pos;
 }
 
-/**
- * Generates tournament-optimized DFS lineups
- */
 export function generateTourneyLineups(
   players: PlayerProjection[],
   sport: Sport,
@@ -60,177 +69,219 @@ export function generateTourneyLineups(
   rosterSlots: string[],
   options: OptimizerOptions
 ): GeneratedLineup[] {
-  const { lockedPlayerIds, excludedPlayerIds, lineupCount, maxExposure } = options;
+  const { lockedPlayerIds, excludedPlayerIds, lineupCount, maxExposure, isCaptainMode } = options;
 
-  // Filter pool
   const pool = players.filter(
     (p) => !excludedPlayerIds.includes(p.id) && p.status !== 'OUT' && !p.isStarted
   );
 
-  const lockedPlayers = pool.filter((p) => lockedPlayerIds.includes(p.id));
+  if (pool.length === 0) return [];
 
-  // Player exposure tracker across generated lineups
   const playerAppearances: Record<string, number> = {};
   pool.forEach((p) => (playerAppearances[p.id] = 0));
 
   const generatedLineups: GeneratedLineup[] = [];
+  const maxAppearances = Math.max(1, Math.ceil(lineupCount * maxExposure));
 
   for (let l = 1; l <= lineupCount; l++) {
-    const selected: PlayerProjection[] = [];
-    const usedIds = new Set<string>();
+    const isShowdown = isCaptainMode || rosterSlots.some((s) => s.startsWith('CPT') || s.startsWith('MVP'));
 
-    // 1. Add locked players first
-    for (const locked of lockedPlayers) {
-      selected.push(locked);
-      usedIds.add(locked.id);
-    }
-
-    // 2. Identify remaining slots to fill
-    const slotsToFill = [...rosterSlots];
-    const assignedSlots: { slotName: string; player: PlayerProjection }[] = [];
-
-    // Assign already selected locked players to valid slots
-    for (const locked of selected) {
-      const validSlotIndex = slotsToFill.findIndex((slot) => canFillSlot(locked, slot, sport));
-      if (validSlotIndex !== -1) {
-        const [slot] = slotsToFill.splice(validSlotIndex, 1);
-        assignedSlots.push({ slotName: slot, player: locked });
-      }
-    }
-
-    // Sort remaining pool for tournament upside:
-    // Blend of ceiling (60%), value (25%), and low ownership leverage (15%) + stochastic variance per lineup
-    const maxAppearances = Math.max(1, Math.ceil(lineupCount * maxExposure));
-
-    // Try multiple iterations to find an optimal and salary-compliant combination
-    let bestRoster: { slotName: string; player: PlayerProjection }[] | null = null;
+    let bestRoster: GeneratedLineup['slots'] | null = null;
     let bestScore = -1;
 
-    const attempts = 150;
+    const attempts = 180;
     for (let att = 0; att < attempts; att++) {
-      const currentAssigned = [...assignedSlots];
-      const remainingSlots = [...slotsToFill];
-      let currentSalary = currentAssigned.reduce((sum, item) => sum + item.player.salary, 0);
-      const tempUsed = new Set<string>(currentAssigned.map((a) => a.player.id));
+      const assigned: GeneratedLineup['slots'] = [];
+      const usedIds = new Set<string>();
+      let currentSalary = 0;
       let possible = true;
 
-      for (const slot of remainingSlots) {
-        // Candidates for this slot
-        const candidates = pool.filter((p) => {
-          if (tempUsed.has(p.id)) return false;
-          if (!canFillSlot(p, slot, sport)) return false;
-          if (lockedPlayerIds.includes(p.id)) return true;
-          // Check exposure limit
-          if (playerAppearances[p.id] >= maxAppearances && l > 1) return false;
+      // Handle Showdown / Single Game
+      if (isShowdown) {
+        const cptSlot = rosterSlots[0];
+        const flexSlots = rosterSlots.slice(1);
+
+        // Pick Captain / MVP
+        const cptCandidates = pool.filter((p) => {
+          if (playerAppearances[p.id] >= maxAppearances && l > 1 && !lockedPlayerIds.includes(p.id)) {
+            return false;
+          }
           return true;
         });
 
-        if (candidates.length === 0) {
-          possible = false;
-          break;
-        }
+        if (cptCandidates.length === 0) continue;
 
-        // Score candidates with tournament weighting and lineup variance
-        const scoredCandidates = candidates.map((p) => {
-          // Jitter weight increases with lineup index to ensure tournament diversity
-          const jitter = (Math.random() - 0.5) * (0.8 + (l / lineupCount) * 1.5);
-          // High ceiling boost
-          const ceilingScore = p.ceiling * 1.2;
-          // Leverage boost: if ownership < 10%, give extra upside bump
-          const leverageMultiplier = p.projectedOwnership < 12 ? 1.15 : p.projectedOwnership > 25 ? 0.95 : 1.0;
-          const score = (ceilingScore * 0.5 + p.valueScore * 5 + jitter * 6) * leverageMultiplier;
-          return { player: p, score };
+        // CPT candidates scored by ceiling & 1.5x multiplier
+        const scoredCpt = cptCandidates.map((p) => {
+          const cost = site === 'draftkings' ? (p.captainSalary || Math.round(p.salary * 1.5)) : p.salary;
+          const pts = p.projectedPoints * 1.5;
+          const jitter = (Math.random() - 0.5) * 4;
+          return { player: p, cost, effectivePts: pts, score: pts * 1.4 - (cost / 1000) * 0.8 + jitter };
         });
+        scoredCpt.sort((a, b) => b.score - a.score);
 
-        scoredCandidates.sort((a, b) => b.score - a.score);
+        // Pick Captain from top choices
+        const chosenCpt = scoredCpt[Math.floor(Math.random() * Math.min(3, scoredCpt.length))];
+        if (!chosenCpt || currentSalary + chosenCpt.cost > salaryCap) continue;
 
-        // Pick from top candidates while keeping average salary per remaining slot reasonable
-        const remainingSlotCount = remainingSlots.length - currentAssigned.length + assignedSlots.length;
-        const remainingBudget = salaryCap - currentSalary;
-        const targetAvgSalary = remainingBudget / (remainingSlotCount || 1);
+        assigned.push({
+          slotName: cptSlot,
+          player: chosenCpt.player,
+          isCaptain: true,
+          costSalary: chosenCpt.cost,
+          effectivePoints: chosenCpt.effectivePts,
+        });
+        usedIds.add(chosenCpt.player.id);
+        currentSalary += chosenCpt.cost;
 
-        // Filter for viable budget range
-        const viable = scoredCandidates.filter(
-          (c) => c.player.salary <= remainingBudget - (remainingSlotCount - 1) * 3000
-        );
+        // Fill remaining FLEX slots
+        for (const flexSlot of flexSlots) {
+          const candidates = pool.filter((p) => !usedIds.has(p.id));
+          if (candidates.length === 0) {
+            possible = false;
+            break;
+          }
 
-        const pickList = viable.length > 0 ? viable.slice(0, 5) : scoredCandidates.slice(0, 3);
-        const chosen = pickList[Math.floor(Math.random() * pickList.length)]?.player || scoredCandidates[0]?.player;
+          const remainingSlots = rosterSlots.length - assigned.length;
+          const remainingBudget = salaryCap - currentSalary;
 
-        if (!chosen || currentSalary + chosen.salary > salaryCap) {
-          possible = false;
-          break;
+          const scoredFlex = candidates.map((p) => {
+            const cost = p.salary;
+            const pts = p.projectedPoints;
+            const jitter = (Math.random() - 0.5) * 3;
+            return { player: p, cost, effectivePts: pts, score: pts + p.valueScore * 3 + jitter };
+          });
+          scoredFlex.sort((a, b) => b.score - a.score);
+
+          const viable = scoredFlex.filter(
+            (c) => c.cost <= remainingBudget - (remainingSlots - 1) * (sport === 'nfl' ? 3500 : 4000)
+          );
+          const poolToPick = viable.length > 0 ? viable.slice(0, 4) : scoredFlex.slice(0, 2);
+          const chosen = poolToPick[Math.floor(Math.random() * poolToPick.length)];
+
+          if (!chosen || currentSalary + chosen.cost > salaryCap) {
+            possible = false;
+            break;
+          }
+
+          assigned.push({
+            slotName: flexSlot,
+            player: chosen.player,
+            isCaptain: false,
+            costSalary: chosen.cost,
+            effectivePoints: chosen.effectivePts,
+          });
+          usedIds.add(chosen.player.id);
+          currentSalary += chosen.cost;
         }
+      } else {
+        // Classic Slate Optimization
+        const remainingSlots = [...rosterSlots];
 
-        tempUsed.add(chosen.id);
-        currentSalary += chosen.salary;
-        currentAssigned.push({ slotName: slot, player: chosen });
+        for (const slot of remainingSlots) {
+          const candidates = pool.filter((p) => {
+            if (usedIds.has(p.id)) return false;
+            if (!canFillSlot(p, slot, sport, false)) return false;
+            if (lockedPlayerIds.includes(p.id)) return true;
+            if (playerAppearances[p.id] >= maxAppearances && l > 1) return false;
+            return true;
+          });
+
+          if (candidates.length === 0) {
+            possible = false;
+            break;
+          }
+
+          const slotsLeft = rosterSlots.length - assigned.length;
+          const budgetLeft = salaryCap - currentSalary;
+
+          const scored = candidates.map((p) => {
+            const jitter = (Math.random() - 0.5) * 4;
+            const score = p.ceiling * 0.4 + p.projectedPoints * 0.6 + p.valueScore * 3 + jitter;
+            return { player: p, score };
+          });
+          scored.sort((a, b) => b.score - a.score);
+
+          const viable = scored.filter(
+            (c) => c.player.salary <= budgetLeft - (slotsLeft - 1) * 3500
+          );
+          const pickList = viable.length > 0 ? viable.slice(0, 4) : scored.slice(0, 2);
+          const chosen = pickList[Math.floor(Math.random() * pickList.length)]?.player || scored[0]?.player;
+
+          if (!chosen || currentSalary + chosen.salary > salaryCap) {
+            possible = false;
+            break;
+          }
+
+          assigned.push({
+            slotName: slot,
+            player: chosen,
+            costSalary: chosen.salary,
+            effectivePoints: chosen.projectedPoints,
+          });
+          usedIds.add(chosen.id);
+          currentSalary += chosen.salary;
+        }
       }
 
-      if (possible && currentAssigned.length === rosterSlots.length && currentSalary <= salaryCap) {
-        const totalProj = currentAssigned.reduce((s, a) => s + a.player.projectedPoints, 0);
-        const totalCeiling = currentAssigned.reduce((s, a) => s + a.player.ceiling, 0);
-        const compositeScore = totalProj * 0.4 + totalCeiling * 0.6;
-
-        if (compositeScore > bestScore) {
-          bestScore = compositeScore;
-          bestRoster = currentAssigned;
+      if (possible && assigned.length === rosterSlots.length && currentSalary <= salaryCap) {
+        const totalPoints = assigned.reduce((sum, item) => sum + item.effectivePoints, 0);
+        if (totalPoints > bestScore) {
+          bestScore = totalPoints;
+          bestRoster = assigned;
         }
       }
     }
 
     if (bestRoster) {
-      // Re-order bestRoster to match the standard site rosterSlots order
-      const orderedSlots: { slotName: string; player: PlayerProjection }[] = [];
-      const remainingPicks = [...bestRoster];
-
-      for (const slot of rosterSlots) {
-        const foundIdx = remainingPicks.findIndex((item) => item.slotName === slot);
-        if (foundIdx !== -1) {
-          orderedSlots.push(remainingPicks.splice(foundIdx, 1)[0]);
-        } else {
-          // Fallback
-          orderedSlots.push(remainingPicks.pop() || { slotName: slot, player: pool[0] });
-        }
-      }
-
-      const totalSalary = orderedSlots.reduce((sum, item) => sum + item.player.salary, 0);
+      const totalSalary = bestRoster.reduce((sum, item) => sum + item.costSalary, 0);
       const totalProjectedPoints = Number(
-        orderedSlots.reduce((sum, item) => sum + item.player.projectedPoints, 0).toFixed(1)
+        bestRoster.reduce((sum, item) => sum + item.effectivePoints, 0).toFixed(1)
       );
       const totalCeiling = Number(
-        orderedSlots.reduce((sum, item) => sum + item.player.ceiling, 0).toFixed(1)
+        bestRoster
+          .reduce(
+            (sum, item) => sum + (item.isCaptain ? item.player.ceiling * 1.5 : item.player.ceiling),
+            0
+          )
+          .toFixed(1)
       );
       const totalFloor = Number(
-        orderedSlots.reduce((sum, item) => sum + item.player.floor, 0).toFixed(1)
+        bestRoster
+          .reduce(
+            (sum, item) => sum + (item.isCaptain ? item.player.floor * 1.5 : item.player.floor),
+            0
+          )
+          .toFixed(1)
       );
       const averageOwnership = Number(
         (
-          orderedSlots.reduce((sum, item) => sum + item.player.projectedOwnership, 0) /
-          orderedSlots.length
+          bestRoster.reduce(
+            (sum, item) =>
+              sum + (item.isCaptain ? item.player.captainOwnership || item.player.projectedOwnership : item.player.projectedOwnership),
+            0
+          ) / bestRoster.length
         ).toFixed(1)
       );
 
-      // Record appearances for exposure tracking
-      orderedSlots.forEach((slot) => {
+      bestRoster.forEach((slot) => {
         playerAppearances[slot.player.id] = (playerAppearances[slot.player.id] || 0) + 1;
       });
 
-      // Detect stacks
       const teamCounts: Record<string, number> = {};
-      orderedSlots.forEach((s) => {
+      bestRoster.forEach((s) => {
         teamCounts[s.player.team] = (teamCounts[s.player.team] || 0) + 1;
       });
       const topTeams = Object.entries(teamCounts).filter(([, count]) => count >= 2);
       const stackDescription =
         topTeams.length > 0
-          ? topTeams.map(([team, count]) => `${count}x ${team}`).join(' + ')
-          : 'Spread correlation';
+          ? topTeams.map(([t, count]) => `${count}x ${t}`).join(' + ')
+          : 'High upside blend';
 
       generatedLineups.push({
         id: `lineup-${l}-${Date.now()}`,
         lineupNumber: l,
-        slots: orderedSlots,
+        slots: bestRoster,
         totalSalary,
         totalProjectedPoints,
         totalCeiling,
@@ -244,24 +295,17 @@ export function generateTourneyLineups(
   return generatedLineups;
 }
 
-/**
- * Exports generated lineups to a CSV formatted for official DraftKings or FanDuel Lineup Upload
- */
 export function exportLineupsToCsv(lineups: GeneratedLineup[], site: Site): string {
   if (!lineups || lineups.length === 0) return '';
 
   const headerSlots = lineups[0].slots.map((s) => s.slotName);
   const csvRows: string[] = [];
 
-  // Site Header Row
   csvRows.push(headerSlots.join(','));
 
   for (const lineup of lineups) {
     const row = lineup.slots.map((slot) => {
       const p = slot.player;
-      // In DraftKings & FanDuel CSV format:
-      // Player Name or Player ID (Name + ID)
-      // e.g. "Nikola Jokic (28491823)" or "Nikola Jokic"
       return `"${p.name} (${p.team})"`;
     });
     csvRows.push(row.join(','));
@@ -270,9 +314,6 @@ export function exportLineupsToCsv(lineups: GeneratedLineup[], site: Site): stri
   return csvRows.join('\n');
 }
 
-/**
- * Triggers a browser file download of the CSV
- */
 export function downloadCsvFile(csvContent: string, filename: string): void {
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);

@@ -2,6 +2,10 @@ export type Sport = 'nba' | 'nfl' | 'nhl' | 'mlb' | 'nascar';
 
 export type Site = 'draftkings' | 'fanduel';
 
+export type SlateStatus = 'Upcoming' | 'Live' | 'Locked';
+
+export type SlateFormat = 'classic' | 'showdown_captain' | 'single_game_mvp';
+
 export type PlayerStatus = 'CONFIRMED' | 'PROBABLE' | 'QUESTIONABLE' | 'GTD' | 'OUT' | 'HEALTHY';
 
 export type MatchupRating = 'soft' | 'average' | 'tough';
@@ -14,24 +18,26 @@ export interface PlayerProjection {
   isHome: boolean;
   position: string; // e.g., 'PG', 'SG', 'QB', 'RB', 'C', 'LW', 'Driver'
   eligiblePositions: string[]; // For DK/FD roster flexibility
-  salary: number; // e.g. 9800
+  salary: number; // Normal salary
+  captainSalary?: number; // For DK Showdown Captain (1.5x)
   projectedPoints: number; // Median projection
   ceiling: number; // 85th-90th percentile tournament upside
   floor: number; // 15th-20th percentile safe floor
   valueScore: number; // Projected Points per $1,000 (e.g. 5.7x)
-  projectedOwnership: number; // Percentage (e.g. 18.5%)
-  gameTime: string; // ISO string or format e.g. "2026-11-05T19:30:00Z"
+  projectedOwnership: number; // Percentage relative to this specific slate
+  captainOwnership?: number; // CPT/MVP ownership in single-game slates
+  gameTime: string; // ISO string e.g. "2026-11-05T20:15:00Z"
   gameTimeFormatted?: string;
   isStarted: boolean;
   isLocked: boolean;
   status: PlayerStatus;
   statusNote?: string;
-  whyNote: string; // Short note on tournament angle / matchup
+  whyNote: string; // Tournament angle & matchup note for this slate
   
   // Matchup Strength
   matchupRating: MatchupRating; // 'soft' | 'average' | 'tough'
-  opponentRank: number; // 1-30 (e.g., 28 = soft / concedes lots of fantasy pts; 2 = tough / elite defense)
-  matchupDetail: string; // e.g. "Opp ranks 28th vs C (soft)"
+  opponentRank: number; // 1-30
+  matchupDetail: string; // e.g. "BAL ranks 24th vs WR (soft)"
   
   // Hot Streak Tracking
   last3Avg: number; // Last 3 games fantasy point average
@@ -46,7 +52,7 @@ export interface PlayerProjection {
 
 export interface SlateStack {
   id: string;
-  type: 'game' | 'team' | 'nascar_dominator';
+  type: 'game' | 'team' | 'nascar_dominator' | 'showdown_onslaught';
   title: string;
   teams: string;
   gameTotal?: number;
@@ -61,7 +67,7 @@ export interface SlateStack {
     position: string;
     salary: number;
     projectedPoints: number;
-    role: string; // e.g. "Lead QB", "Alpha WR1", "Opponent Run-back", "PP1 Center", "Pole Dominator"
+    role: string; // e.g. "Captain CPT", "Lead QB", "Alpha WR1", "Bring-back", "PP1 Center", "Dominator"
   }[];
   analysis: string;
 }
@@ -75,21 +81,35 @@ export interface NewsItem {
   type: 'OUT_ALERT' | 'LINEUP_CONFIRMED' | 'INJURY_UPDATE' | 'SCRATCH' | 'STARTING_GOALIE';
   headline: string;
   details: string;
-  isTopValuePlay: boolean; // Flag if this is a top value or high-owned stud
-  impactNote: string; // Fantasy ripple effect / replacement target
+  isTopValuePlay: boolean;
+  impactNote: string;
 }
 
-export interface SportSlate {
+export interface SlateMeta {
+  id: string;
   sport: Sport;
+  site: Site;
+  date: string; // e.g. "2026-11-05"
+  dayLabel: string; // e.g. "Today (Thu, Nov 5)" or "Sunday (Nov 8)"
+  slateName: string; // e.g. "Jacksonville at Baltimore (1 game, 8:15 PM)"
+  shortLabel: string; // e.g. "JAX @ BAL Showdown"
+  format: SlateFormat;
+  gameCount: number;
+  firstGameTime: string;
+  lastGameTime: string;
+  teams: string[];
+  gameSummary: string;
+  status: SlateStatus;
+  isCaptainMode: boolean;
+  salaryCap: number;
+  rosterSlots: string[];
+  isNewSlate?: boolean;
+}
+
+export interface SportSlate extends SlateMeta {
   sportLabel: string;
   hasGamesToday: boolean;
   seasonContext: string;
-  date: string; // e.g., "2026-11-05"
-  site: Site;
-  salaryCap: number; // $50,000 or $60,000
-  rosterSlots: string[]; // e.g. ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
-  firstGameTime: string;
-  lastGameTime: string;
   lastUpdated: string;
   sources: string[];
   players: PlayerProjection[];
@@ -104,17 +124,15 @@ export interface SportSlate {
   };
 }
 
-export interface LineupSlot {
-  slotName: string;
-  player: PlayerProjection | null;
-}
-
 export interface GeneratedLineup {
   id: string;
   lineupNumber: number;
   slots: {
     slotName: string;
     player: PlayerProjection;
+    isCaptain?: boolean;
+    costSalary: number;
+    effectivePoints: number;
   }[];
   totalSalary: number;
   totalProjectedPoints: number;

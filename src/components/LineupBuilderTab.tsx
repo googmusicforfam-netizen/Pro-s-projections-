@@ -58,6 +58,9 @@ export const LineupBuilderTab: React.FC<LineupBuilderTabProps> = ({
   const handleGenerateLineups = () => {
     setIsGenerating(true);
     setTimeout(() => {
+      const isCaptainMode = rosterSlots.some(
+        (s) => s.startsWith('CPT') || s.startsWith('MVP')
+      );
       const lineups = generateTourneyLineups(
         players,
         sport,
@@ -69,6 +72,7 @@ export const LineupBuilderTab: React.FC<LineupBuilderTabProps> = ({
           excludedPlayerIds,
           lineupCount,
           maxExposure,
+          isCaptainMode,
         }
       );
       setGeneratedLineups(lineups);
@@ -333,7 +337,14 @@ export const LineupBuilderTab: React.FC<LineupBuilderTabProps> = ({
                       return (
                         <tr key={sIdx} className="hover:bg-slate-800/40">
                           <td className="py-2.5 px-3 font-bold text-emerald-400 font-sans">
-                            {slot.slotName}
+                            <div className="flex items-center gap-1.5">
+                              <span>{slot.slotName}</span>
+                              {slot.isCaptain && (
+                                <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                                  1.5x
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="py-2.5 px-3 font-sans">
                             <div className="flex items-center gap-2">
@@ -344,10 +355,10 @@ export const LineupBuilderTab: React.FC<LineupBuilderTabProps> = ({
                             </div>
                           </td>
                           <td className="py-2.5 px-3 text-right font-bold text-slate-200 tabular-nums">
-                            ${p.salary.toLocaleString()}
+                            ${(slot.costSalary || p.salary).toLocaleString()}
                           </td>
                           <td className="py-2.5 px-3 text-right font-bold text-emerald-400 tabular-nums">
-                            {p.projectedPoints.toFixed(1)}
+                            {(slot.effectivePoints || p.projectedPoints).toFixed(1)}
                           </td>
                           <td className="py-2.5 px-3 text-right text-slate-300 tabular-nums">
                             {p.ceiling.toFixed(1)}
